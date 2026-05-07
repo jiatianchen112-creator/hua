@@ -101,6 +101,10 @@ export class Bloom {
     }
   }
 
+  isComplete(): boolean {
+    return this.progress >= 1;
+  }
+
   draw(ctx: CanvasRenderingContext2D) {
     if (this.progress <= 0) return;
     

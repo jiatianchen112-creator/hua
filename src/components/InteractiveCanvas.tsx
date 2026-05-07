@@ -2,9 +2,16 @@ import React, { useEffect, useRef, useState } from 'react';
 import { audioSystem } from '../lib/audio';
 import { Particle, Bloom, Vector2 } from '../lib/visuals';
 
+const MAX_DPR = 2;
+const NEBULA_PARTICLE_COUNT = 50;
+const MAX_PARTICLES = 180;
+const MAX_ACTIVE_BLOOMS = 4;
+
 export const InteractiveCanvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const staticBloomCanvasRef = useRef<HTMLCanvasElement>(null);
   const [hasStarted, setHasStarted] = useState(false);
+  const hasStartedRef = useRef(false);
   
   // State refs to avoid re-renders
   const stateRef = useRef({
@@ -15,11 +22,13 @@ export const InteractiveCanvas: React.FC = () => {
     mouseY: -100,
     lastMouseX: -100,
     lastMouseY: -100,
-    time: 0
+    time: 0,
+    lastChimeFrame: 0
   });
 
   const handleInteractionStart = () => {
-    if (!hasStarted) {
+    if (!hasStartedRef.current) {
+      hasStartedRef.current = true;
       setHasStarted(true);
       audioSystem.init();
       audioSystem.resume();
@@ -28,33 +37,57 @@ export const InteractiveCanvas: React.FC = () => {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const staticBloomCanvas = staticBloomCanvasRef.current;
+    if (!canvas || !staticBloomCanvas) return;
 
-    const ctx = canvas.getContext('2d', { alpha: false });
-    if (!ctx) return;
+    const ctx = canvas.getContext('2d', { alpha: true });
+    const staticBloomCtx = staticBloomCanvas.getContext('2d', { alpha: true });
+    if (!ctx || !staticBloomCtx) return;
 
     let animationFrameId: number;
     let width = window.innerWidth;
     let height = window.innerHeight;
 
+    const state = stateRef.current;
+
+    const bakeBloom = (bloom: Bloom, forceComplete = false) => {
+      const previousProgress = bloom.progress;
+      if (forceComplete) {
+        bloom.progress = 1;
+      }
+
+      staticBloomCtx.save();
+      staticBloomCtx.globalCompositeOperation = 'lighter';
+      bloom.draw(staticBloomCtx);
+      staticBloomCtx.restore();
+
+      bloom.progress = previousProgress;
+    };
+
     const resize = () => {
       width = window.innerWidth;
       height = window.innerHeight;
       // High DPI screens support
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       canvas.width = width * dpr;
       canvas.height = height * dpr;
-      ctx.scale(dpr, dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
+
+      staticBloomCanvas.width = width * dpr;
+      staticBloomCanvas.height = height * dpr;
+      staticBloomCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      state.blooms.length = 0;
+      staticBloomCanvas.style.width = `${width}px`;
+      staticBloomCanvas.style.height = `${height}px`;
     };
 
     window.addEventListener('resize', resize);
     resize();
 
     // Initialize Nebula
-    const state = stateRef.current;
-    for (let i = 0; i < 50; i++) {
+    for (let i = state.particles.length; i < NEBULA_PARTICLE_COUNT; i++) {
         state.particles.push(new Particle(Math.random() * width, Math.random() * height, 'nebula'));
     }
 
@@ -134,12 +167,13 @@ export const InteractiveCanvas: React.FC = () => {
              state.vinePoints.push({ x: state.mouseX, y: state.mouseY });
              
              // Play dynamic chime based on movement speed
-             if (hasStarted) {
+             if (hasStartedRef.current && state.time - state.lastChimeFrame > 4) {
+                 state.lastChimeFrame = state.time;
                  audioSystem.playChime(dist);
              }
 
              // Emit spores
-             if (Math.random() < 0.3) {
+             if (state.particles.length < MAX_PARTICLES && Math.random() < 0.3) {
                  state.particles.push(new Particle(state.mouseX, state.mouseY, 'spore'));
              }
          }
@@ -161,19 +195,16 @@ export const InteractiveCanvas: React.FC = () => {
       drawVine();
 
       // Render blooms
-      // We want additive blending for a magical look
+      // Animate only opening blooms. Completed blooms are baked into staticBloomCanvas.
       ctx.globalCompositeOperation = 'lighter';
       for (let i = state.blooms.length - 1; i >= 0; i--) {
         const bloom = state.blooms[i];
         bloom.update();
         bloom.draw(ctx);
-        // Remove after fully rendered and maybe some time? 
-        // We can let them stay indefinitely and just slowly fade, but for performance,
-        // let's say they stay as long as they are drawn. Actually, the bloom object itself
-        // doesn't fade in our implementation, but we might want them to fade eventually.
-        // Let's add a long lifespan if needed.
-        if (state.blooms.length > 20) {
-            state.blooms.shift(); // Keep max 20 blooms
+
+        if (bloom.isComplete()) {
+            bakeBloom(bloom);
+            state.blooms.splice(i, 1);
         }
       }
       ctx.globalCompositeOperation = 'source-over';
@@ -202,7 +233,7 @@ export const InteractiveCanvas: React.FC = () => {
       window.removeEventListener('resize', resize);
       cancelAnimationFrame(animationFrameId);
     };
-  }, [hasStarted]);
+  }, []);
 
   const handleMouseMove = (e: React.MouseEvent | React.TouchEvent) => {
     handleInteractionStart();
@@ -243,9 +274,24 @@ export const InteractiveCanvas: React.FC = () => {
 
     // Spawn a bloom
     state.blooms.push(new Bloom(clientX, clientY));
+    while (state.blooms.length > MAX_ACTIVE_BLOOMS) {
+        const bloom = state.blooms.shift();
+        if (bloom) {
+            bloom.progress = 1;
+            const staticBloomCanvas = staticBloomCanvasRef.current;
+            const staticBloomCtx = staticBloomCanvas?.getContext('2d', { alpha: true });
+            if (staticBloomCtx) {
+                staticBloomCtx.save();
+                staticBloomCtx.globalCompositeOperation = 'lighter';
+                bloom.draw(staticBloomCtx);
+                staticBloomCtx.restore();
+            }
+        }
+    }
 
     // Spawn golden pollen
-    for (let i = 0; i < 30; i++) {
+    const pollenCount = Math.min(30, MAX_PARTICLES - state.particles.length);
+    for (let i = 0; i < pollenCount; i++) {
         state.particles.push(new Particle(clientX, clientY, 'pollen'));
     }
   };
@@ -257,6 +303,11 @@ export const InteractiveCanvas: React.FC = () => {
         <div className="absolute top-1/4 left-1/4 w-[500px] h-[500px] bg-purple-700/30 rounded-full blur-[120px] mix-blend-screen animate-pulse"></div>
         <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] bg-fuchsia-500/20 rounded-full blur-[100px] mix-blend-screen"></div>
       </div>
+
+      <canvas
+        ref={staticBloomCanvasRef}
+        className="absolute inset-0 z-10 block pointer-events-none"
+      />
 
       <canvas
         ref={canvasRef}
