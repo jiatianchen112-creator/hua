@@ -1,15 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { audioSystem } from '../lib/audio';
 import { Particle, Bloom, Vector2 } from '../lib/visuals';
+import { WebGLRenderer } from '../lib/webglRenderer';
 
 const MAX_DPR = 2;
 const NEBULA_PARTICLE_COUNT = 50;
-const MAX_PARTICLES = 180;
-const MAX_ACTIVE_BLOOMS = 4;
+const MAX_PARTICLES = 360;
+const MAX_BLOOMS = 80;
 
 export const InteractiveCanvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const staticBloomCanvasRef = useRef<HTMLCanvasElement>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const hasStartedRef = useRef(false);
   
@@ -37,12 +37,15 @@ export const InteractiveCanvas: React.FC = () => {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const staticBloomCanvas = staticBloomCanvasRef.current;
-    if (!canvas || !staticBloomCanvas) return;
+    if (!canvas) return;
 
-    const ctx = canvas.getContext('2d', { alpha: true });
-    const staticBloomCtx = staticBloomCanvas.getContext('2d', { alpha: true });
-    if (!ctx || !staticBloomCtx) return;
+    let renderer: WebGLRenderer;
+    try {
+      renderer = new WebGLRenderer(canvas, MAX_DPR);
+    } catch (error) {
+      console.error(error);
+      return;
+    }
 
     let animationFrameId: number;
     let width = window.innerWidth;
@@ -50,37 +53,10 @@ export const InteractiveCanvas: React.FC = () => {
 
     const state = stateRef.current;
 
-    const bakeBloom = (bloom: Bloom, forceComplete = false) => {
-      const previousProgress = bloom.progress;
-      if (forceComplete) {
-        bloom.progress = 1;
-      }
-
-      staticBloomCtx.save();
-      staticBloomCtx.globalCompositeOperation = 'lighter';
-      bloom.draw(staticBloomCtx);
-      staticBloomCtx.restore();
-
-      bloom.progress = previousProgress;
-    };
-
     const resize = () => {
       width = window.innerWidth;
       height = window.innerHeight;
-      // High DPI screens support
-      const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-
-      staticBloomCanvas.width = width * dpr;
-      staticBloomCanvas.height = height * dpr;
-      staticBloomCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      state.blooms.length = 0;
-      staticBloomCanvas.style.width = `${width}px`;
-      staticBloomCanvas.style.height = `${height}px`;
+      renderer.resize(MAX_DPR);
     };
 
     window.addEventListener('resize', resize);
@@ -91,70 +67,10 @@ export const InteractiveCanvas: React.FC = () => {
         state.particles.push(new Particle(Math.random() * width, Math.random() * height, 'nebula'));
     }
 
-    const drawBackground = () => {
-      ctx.clearRect(0, 0, width, height);
-
-      // Draw faint glowing geometric grid
-      ctx.strokeStyle = 'rgba(150, 100, 200, 0.15)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      const gridSize = 100;
-      const tY = (state.time * 0.2) % gridSize;
-      const tX = (state.time * 0.1) % gridSize;
-      
-      for (let x = tX; x < width; x += gridSize) {
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-      }
-      for (let y = tY; y < height; y += gridSize) {
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-      }
-      ctx.stroke();
-    };
-
-    const drawVine = () => {
-      const points = state.vinePoints;
-      if (points.length < 2) return;
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(points[0].x, points[0].y);
-      
-      for (let i = 1; i < points.length - 1; i++) {
-        const xc = (points[i].x + points[i + 1].x) / 2;
-        const yc = (points[i].y + points[i + 1].y) / 2;
-        ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
-      }
-      
-      // Curve through the last two points
-      const lastPoint = points[points.length - 1];
-      const secondLastPoint = points[points.length - 2];
-      ctx.quadraticCurveTo(secondLastPoint.x, secondLastPoint.y, lastPoint.x, lastPoint.y);
-      
-      // Outer glow / segment
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      
-      // Core
-      ctx.strokeStyle = '#ff88ff';
-      ctx.lineWidth = 3;
-      ctx.shadowColor = '#ff00ff';
-      ctx.shadowBlur = 15;
-      ctx.stroke();
-
-      // Translucent shell
-      ctx.strokeStyle = 'rgba(200, 150, 255, 0.4)';
-      ctx.lineWidth = 8;
-      ctx.shadowBlur = 0;
-      ctx.stroke();
-
-      ctx.restore();
-    };
-
     const render = () => {
       state.time += 1;
-      drawBackground();
+      renderer.clear();
+      renderer.drawGrid(state.time);
 
       // Manage Vine points
       if (state.mouseX > 0 && state.mouseY > 0 && 
@@ -192,28 +108,20 @@ export const InteractiveCanvas: React.FC = () => {
       state.lastMouseX = state.mouseX;
       state.lastMouseY = state.mouseY;
 
-      drawVine();
+      renderer.drawVine(state.vinePoints);
 
-      // Render blooms
-      // Animate only opening blooms. Completed blooms are baked into staticBloomCanvas.
-      ctx.globalCompositeOperation = 'lighter';
       for (let i = state.blooms.length - 1; i >= 0; i--) {
         const bloom = state.blooms[i];
-        bloom.update();
-        bloom.draw(ctx);
-
-        if (bloom.isComplete()) {
-            bakeBloom(bloom);
-            state.blooms.splice(i, 1);
+        if (!bloom.isComplete()) {
+          bloom.update();
         }
       }
-      ctx.globalCompositeOperation = 'source-over';
+      renderer.drawBlooms(state.blooms);
 
       // Update & Render particles
       for (let i = state.particles.length - 1; i >= 0; i--) {
         const p = state.particles[i];
         p.update();
-        p.draw(ctx);
         
         if (p.life <= 0) {
           state.particles.splice(i, 1);
@@ -223,6 +131,7 @@ export const InteractiveCanvas: React.FC = () => {
           }
         }
       }
+      renderer.drawParticles(state.particles);
 
       animationFrameId = requestAnimationFrame(render);
     };
@@ -274,19 +183,8 @@ export const InteractiveCanvas: React.FC = () => {
 
     // Spawn a bloom
     state.blooms.push(new Bloom(clientX, clientY));
-    while (state.blooms.length > MAX_ACTIVE_BLOOMS) {
-        const bloom = state.blooms.shift();
-        if (bloom) {
-            bloom.progress = 1;
-            const staticBloomCanvas = staticBloomCanvasRef.current;
-            const staticBloomCtx = staticBloomCanvas?.getContext('2d', { alpha: true });
-            if (staticBloomCtx) {
-                staticBloomCtx.save();
-                staticBloomCtx.globalCompositeOperation = 'lighter';
-                bloom.draw(staticBloomCtx);
-                staticBloomCtx.restore();
-            }
-        }
+    if (state.blooms.length > MAX_BLOOMS) {
+        state.blooms.splice(0, state.blooms.length - MAX_BLOOMS);
     }
 
     // Spawn golden pollen
@@ -303,11 +201,6 @@ export const InteractiveCanvas: React.FC = () => {
         <div className="absolute top-1/4 left-1/4 w-[500px] h-[500px] bg-purple-700/30 rounded-full blur-[120px] mix-blend-screen animate-pulse"></div>
         <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] bg-fuchsia-500/20 rounded-full blur-[100px] mix-blend-screen"></div>
       </div>
-
-      <canvas
-        ref={staticBloomCanvasRef}
-        className="absolute inset-0 z-10 block pointer-events-none"
-      />
 
       <canvas
         ref={canvasRef}
