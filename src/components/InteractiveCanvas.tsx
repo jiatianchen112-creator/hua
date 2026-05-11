@@ -1,10 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { audioSystem } from '../lib/audio';
 import { Particle, Bloom, Vector2 } from '../lib/visuals';
+import { WebGLRenderer } from '../lib/webglRenderer';
+
+const MAX_DPR = 2;
+const NEBULA_PARTICLE_COUNT = 50;
+const MAX_PARTICLES = 360;
+const MAX_BLOOMS = 80;
 
 export const InteractiveCanvas: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hasStarted, setHasStarted] = useState(false);
+  const hasStartedRef = useRef(false);
   
   // State refs to avoid re-renders
   const stateRef = useRef({
@@ -15,11 +22,13 @@ export const InteractiveCanvas: React.FC = () => {
     mouseY: -100,
     lastMouseX: -100,
     lastMouseY: -100,
-    time: 0
+    time: 0,
+    lastChimeFrame: 0
   });
 
   const handleInteractionStart = () => {
-    if (!hasStarted) {
+    if (!hasStartedRef.current) {
+      hasStartedRef.current = true;
       setHasStarted(true);
       audioSystem.init();
       audioSystem.resume();
@@ -30,98 +39,38 @@ export const InteractiveCanvas: React.FC = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d', { alpha: false });
-    if (!ctx) return;
+    let renderer: WebGLRenderer;
+    try {
+      renderer = new WebGLRenderer(canvas, MAX_DPR);
+    } catch (error) {
+      console.error(error);
+      return;
+    }
 
     let animationFrameId: number;
     let width = window.innerWidth;
     let height = window.innerHeight;
 
+    const state = stateRef.current;
+
     const resize = () => {
       width = window.innerWidth;
       height = window.innerHeight;
-      // High DPI screens support
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
-      ctx.scale(dpr, dpr);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
+      renderer.resize(MAX_DPR);
     };
 
     window.addEventListener('resize', resize);
     resize();
 
     // Initialize Nebula
-    const state = stateRef.current;
-    for (let i = 0; i < 50; i++) {
+    for (let i = state.particles.length; i < NEBULA_PARTICLE_COUNT; i++) {
         state.particles.push(new Particle(Math.random() * width, Math.random() * height, 'nebula'));
     }
 
-    const drawBackground = () => {
-      ctx.clearRect(0, 0, width, height);
-
-      // Draw faint glowing geometric grid
-      ctx.strokeStyle = 'rgba(150, 100, 200, 0.15)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      const gridSize = 100;
-      const tY = (state.time * 0.2) % gridSize;
-      const tX = (state.time * 0.1) % gridSize;
-      
-      for (let x = tX; x < width; x += gridSize) {
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-      }
-      for (let y = tY; y < height; y += gridSize) {
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-      }
-      ctx.stroke();
-    };
-
-    const drawVine = () => {
-      const points = state.vinePoints;
-      if (points.length < 2) return;
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(points[0].x, points[0].y);
-      
-      for (let i = 1; i < points.length - 1; i++) {
-        const xc = (points[i].x + points[i + 1].x) / 2;
-        const yc = (points[i].y + points[i + 1].y) / 2;
-        ctx.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
-      }
-      
-      // Curve through the last two points
-      const lastPoint = points[points.length - 1];
-      const secondLastPoint = points[points.length - 2];
-      ctx.quadraticCurveTo(secondLastPoint.x, secondLastPoint.y, lastPoint.x, lastPoint.y);
-      
-      // Outer glow / segment
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      
-      // Core
-      ctx.strokeStyle = '#ff88ff';
-      ctx.lineWidth = 3;
-      ctx.shadowColor = '#ff00ff';
-      ctx.shadowBlur = 15;
-      ctx.stroke();
-
-      // Translucent shell
-      ctx.strokeStyle = 'rgba(200, 150, 255, 0.4)';
-      ctx.lineWidth = 8;
-      ctx.shadowBlur = 0;
-      ctx.stroke();
-
-      ctx.restore();
-    };
-
     const render = () => {
       state.time += 1;
-      drawBackground();
+      renderer.clear();
+      renderer.drawGrid(state.time);
 
       // Manage Vine points
       if (state.mouseX > 0 && state.mouseY > 0 && 
@@ -134,12 +83,13 @@ export const InteractiveCanvas: React.FC = () => {
              state.vinePoints.push({ x: state.mouseX, y: state.mouseY });
              
              // Play dynamic chime based on movement speed
-             if (hasStarted) {
+             if (hasStartedRef.current && state.time - state.lastChimeFrame > 4) {
+                 state.lastChimeFrame = state.time;
                  audioSystem.playChime(dist);
              }
 
              // Emit spores
-             if (Math.random() < 0.3) {
+             if (state.particles.length < MAX_PARTICLES && Math.random() < 0.3) {
                  state.particles.push(new Particle(state.mouseX, state.mouseY, 'spore'));
              }
          }
@@ -158,31 +108,20 @@ export const InteractiveCanvas: React.FC = () => {
       state.lastMouseX = state.mouseX;
       state.lastMouseY = state.mouseY;
 
-      drawVine();
+      renderer.drawVine(state.vinePoints);
 
-      // Render blooms
-      // We want additive blending for a magical look
-      ctx.globalCompositeOperation = 'lighter';
       for (let i = state.blooms.length - 1; i >= 0; i--) {
         const bloom = state.blooms[i];
-        bloom.update();
-        bloom.draw(ctx);
-        // Remove after fully rendered and maybe some time? 
-        // We can let them stay indefinitely and just slowly fade, but for performance,
-        // let's say they stay as long as they are drawn. Actually, the bloom object itself
-        // doesn't fade in our implementation, but we might want them to fade eventually.
-        // Let's add a long lifespan if needed.
-        if (state.blooms.length > 20) {
-            state.blooms.shift(); // Keep max 20 blooms
+        if (!bloom.isComplete()) {
+          bloom.update();
         }
       }
-      ctx.globalCompositeOperation = 'source-over';
+      renderer.drawBlooms(state.blooms);
 
       // Update & Render particles
       for (let i = state.particles.length - 1; i >= 0; i--) {
         const p = state.particles[i];
         p.update();
-        p.draw(ctx);
         
         if (p.life <= 0) {
           state.particles.splice(i, 1);
@@ -192,6 +131,7 @@ export const InteractiveCanvas: React.FC = () => {
           }
         }
       }
+      renderer.drawParticles(state.particles);
 
       animationFrameId = requestAnimationFrame(render);
     };
@@ -202,7 +142,7 @@ export const InteractiveCanvas: React.FC = () => {
       window.removeEventListener('resize', resize);
       cancelAnimationFrame(animationFrameId);
     };
-  }, [hasStarted]);
+  }, []);
 
   const handleMouseMove = (e: React.MouseEvent | React.TouchEvent) => {
     handleInteractionStart();
@@ -243,9 +183,13 @@ export const InteractiveCanvas: React.FC = () => {
 
     // Spawn a bloom
     state.blooms.push(new Bloom(clientX, clientY));
+    if (state.blooms.length > MAX_BLOOMS) {
+        state.blooms.splice(0, state.blooms.length - MAX_BLOOMS);
+    }
 
     // Spawn golden pollen
-    for (let i = 0; i < 30; i++) {
+    const pollenCount = Math.min(30, MAX_PARTICLES - state.particles.length);
+    for (let i = 0; i < pollenCount; i++) {
         state.particles.push(new Particle(clientX, clientY, 'pollen'));
     }
   };
